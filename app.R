@@ -7,12 +7,12 @@ library(readr)
 library(ggmap)
 library(maps)
 library(RColorBrewer)
-# library(leaflet)
 library(scales)
-library(plotly)
+library(DT)
 options(scipen = 9)
 
 # load the data before starting up the application
+# source: https://data.wprdc.org/dataset/capital-projects
 capital.projects <- read_csv("data/capital_projects.csv") 
 
 # remove erroneous lat / long
@@ -25,18 +25,24 @@ status_options <- unique(capital.projects$status)
 district_options <- sort(unique(capital.projects$council_district))
 year_options <- unique(capital.projects$proj_year)
 
-# Define UI for random distribution app ----
+# Define UI ----
+#' We're going to build a user interface side -- what the user will view
+#' and interact with and input selections
+#' and server side that will render calculations and plots
 ui <- fluidPage(
   
   # App title ----
   titlePanel("Pittsburgh Capital Projects"),
   
+  # we're going to use a simple layout with user input 
+  # in a left column and plots and output on the right
+  # Other layout templates: https://shiny.rstudio.com/gallery/
   sidebarLayout(
     
     # Sidebar panel for inputs ----
     sidebarPanel(
       
-      # Input: Slider for the number of observations to generate
+      # Input: Slider to filter based on project budget
       sliderInput("amount_input",
                   label = "Budgeted Amount",
                   min = 2500,  max = 7500000,
@@ -46,19 +52,22 @@ ui <- fluidPage(
       # br() element to introduce extra vertical spacing 
       br(),
       
-      # Input: Select the random distribution type 
+      # User selects status from drop down menu 
       selectInput("status_input",
                   label="Status",
                   choices=status_options,
+                  # multiple = TRUE means user can select
+                  # more than one
+                  # switch to false to be single option dropdown
                   multiple=TRUE),
       
-      # Input: Select the random distribution type 
+      
       selectInput("district_input",
                   label="Council Districts",
                   choices=district_options,
                   multiple=TRUE),
       
-      # Input: Select the random distribution type 
+      
       selectInput("year_input",
                   label="Project Year",
                   choices=year_options,
@@ -67,13 +76,17 @@ ui <- fluidPage(
     ),
     
     # Main panel for displaying outputs ----
+    #' This panel will display outputs based on user filters
+    #' and our server side logic
     mainPanel(
+      
+      h4(textOutput("total_projects")),
       
       # Output: Tabset w/ plot, summary, and table ----
       tabsetPanel(type = "tabs",
                   tabPanel("Plot", plotOutput("district_year_status_plot")),
                   tabPanel("Mapped", plotOutput("mapped")),
-                  tabPanel("Table", tableOutput("table"))
+                  tabPanel("Table", DT::dataTableOutput("table"))
       )
       
     )
@@ -86,6 +99,7 @@ server <- function(input, output) {
   # Reactive expression to generate the requested distribution ----
   # This is called whenever the inputs change. The output functions
   # defined below then use the value computed from this expression
+  # Generating a reactive function that we're going to use like a dataframe
   projectsData <- reactive({
     
     proj.data <- dplyr::filter(capital.projects,
@@ -93,9 +107,10 @@ server <- function(input, output) {
                                budgeted_amount <= input$amount_input[2]
     )
     
-    # on these filters below, only filtering if a filter is selected
+    # on these filters below, only filtering if a filter is selected --
+    # check that there is any input in that user selection, otherwise
+    # do not apply filter
     
-    # check if we have specified status
     if(length(input$status_input) > 0){
       proj.data <- proj.data %>%
         dplyr::filter(
@@ -128,18 +143,25 @@ server <- function(input, output) {
     
     cap.proj.year.dist.status <- projectsData() %>%
       dplyr::group_by(proj_year, council_district, status) %>%
-      dplyr::summarise(amount = sum(budgeted_amount, na.rm = T))
+      dplyr::summarise(amount = round(sum(budgeted_amount, na.rm = T), 0))
     
     return(cap.proj.year.dist.status)
     
   })
   
+  # any time you want to be sending text over to the user interface
+  # going to use renderText function
+  output$total_projects <- renderText({
+    # Count the total number of projects we are exploring
+    # and return some text in the form "Exploring x crashes"
+    # note that we're calling the projectsData() function here
+    proj.count <- format(nrow(projectsData()), big.mark=",")
+    paste("Exploring", proj.count, "Projects", sep=" ")
+  })
+  
   # Generate a plot of the data ----
-  # Also uses the inputs to build the plot label. Note that the
-  # dependencies on the inputs and the data reactive expression are
-  # both tracked, and all expressions are called in the sequence
-  # implied by the dependency graph.
   output$district_year_status_plot <- renderPlot({
+    
     projectsSummarized() %>%
       dplyr::ungroup() %>%
       dplyr::filter(!is.na(council_district)) %>%
@@ -151,7 +173,7 @@ server <- function(input, output) {
       scale_y_continuous(labels = scales::dollar) +
       #coord_flip() +
       theme_light() +
-      facet_wrap("council_district", ncol = 3) +
+      facet_wrap("council_district", ncol = 3, scales = "free_y") +
       labs(x = "Project Year", y = "Budgeted Amount", fill = "",
            title = "Capital Project Budgets by District, Year, Status") 
   })
@@ -159,17 +181,22 @@ server <- function(input, output) {
   
   output$mapped <- renderPlot({
     
+    # Generate the lat/lon rectangle that will contain
+    # the given lat and lon from the projects
     map_box <- make_bbox(lat = latitude, lon = longitude, 
                          data = capital.projects)
+    # get base map based on those parameters
     base_map <- get_map(location = map_box, source = "google", color = "bw")
     # Google's Terms of Service: https://cloud.google.com/maps-platform/terms/.
     # Please cite ggmap if you use it! See citation("ggmap") for details.
     
     ggmap(base_map) +
       geom_jitter(data = projectsData(), 
-                  aes(x = longitude, y = latitude, color = status, size = budgeted_amount),
+                  aes(x = longitude, y = latitude, 
+                      color = status, size = budgeted_amount),
                   alpha = 0.7) +
-      scale_color_brewer(palette = "Paired") + 
+      scale_color_brewer(palette = "Paired") +
+      scale_size(range = c(4, 12)) +
       theme_void() +
       labs(x = "", y = "", title = "Locations", 
            color = "Status", size = "Budgeted\nAmount")
@@ -180,10 +207,17 @@ server <- function(input, output) {
     summary(projectsSummarized())
   })
   
-  # Generate an HTML table view of the data ----
-  output$table <- renderTable({
-    projectsSummarized()
-  })
+  # Generate a searchable, sortable table view of the data ----
+  # more info on Shiny + datatables: https://shiny.rstudio.com/articles/datatables.html
+  output$table <- DT::renderDataTable(DT::datatable({
+    projectsSummarized() %>%
+      dplyr::rename(
+        `Project Year` = proj_year,
+        `Council District` = council_district,
+        Status = status,
+        Amount = amount
+      )
+  }))
   
 }
 
